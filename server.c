@@ -1,4 +1,4 @@
-//server.c
+// server.c (modifié pour éviter la troncation avec calcul de longueur)
 #include <sys/types.h>
 #include <netdb.h>
 #include <stdio.h>
@@ -9,208 +9,162 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/select.h>
-#include <time.h>
-#include <signal.h> // librairie pour nettoyer les zombies
 
-int nombre_clients = 0;
+#define MAX_CLIENTS 100
+#define MAX_MSG_LEN 8192 // Limite de taille de message
 
-// Création et configuration de la socket serveur
-int socket_serveur(unsigned short port)
+int main(int argc, char **argv)
 {
-    int serveur_socket, option = 1;
-    struct sockaddr_in serveur_sockaddr_in;
-
-    serveur_socket = socket(PF_INET, SOCK_STREAM, 0); // Socket TCP
-    if (serveur_socket == -1)
+    if (argc != 2)
     {
-        perror("socket");
+        fprintf(stderr, "Usage: %s port\n", argv[0]);
         exit(EXIT_FAILURE);
     }
 
-    // Permet de réutiliser le port rapidement après un crash
-    if (setsockopt(serveur_socket, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option)) == -1)
+    unsigned short port = atoi(argv[1]);
+    int serveur_socket, client_socket;
+    struct sockaddr_in serveur_addr, client_addr;
+    socklen_t client_len = sizeof(client_addr);
+    int clients[MAX_CLIENTS];
+    char *pseudos[MAX_CLIENTS]; // Tableau pour stocker les pseudos
+    int max_sd, sd, activity, i, new_socket;
+    fd_set readfds;
+
+    // Init clients
+    for (i = 0; i < MAX_CLIENTS; i++)
+        clients[i] = 0;
+
+    // Création de la socket serveur
+    serveur_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (serveur_socket == 0)
+    {
+        perror("socket failed");
+        exit(EXIT_FAILURE);
+    }
+
+    int opt = 1;
+    if (setsockopt(serveur_socket, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof(opt)) < 0)
     {
         perror("setsockopt");
         exit(EXIT_FAILURE);
     }
 
-    memset(&serveur_sockaddr_in, 0, sizeof(serveur_sockaddr_in));
-    serveur_sockaddr_in.sin_family = AF_INET;
-    serveur_sockaddr_in.sin_port = htons(port);
-    serveur_sockaddr_in.sin_addr.s_addr = INADDR_ANY;  // Accepte toutes les connexions entrantes
+    serveur_addr.sin_family = AF_INET;
+    serveur_addr.sin_addr.s_addr = INADDR_ANY;
+    serveur_addr.sin_port = htons(port);
 
-    /* Ecoute sur le port mentionne */
-    if (bind(serveur_socket, (struct sockaddr *)&serveur_sockaddr_in, sizeof(serveur_sockaddr_in)) == -1)
+    if (bind(serveur_socket, (struct sockaddr *)&serveur_addr, sizeof(serveur_addr)) < 0)
     {
-        perror("bind");
+        perror("bind failed");
         exit(EXIT_FAILURE);
     }
-    if (listen(serveur_socket, SOMAXCONN) == -1)
+    printf(">>> Serveur lancé sur le port %d\n", port);
+
+    if (listen(serveur_socket, 3) < 0)
     {
         perror("listen");
         exit(EXIT_FAILURE);
     }
 
-    return serveur_socket;
-}
-
-// Traitement des commandes spéciales du client
-void traiter_commande(int client_socket, char *commande) {
-    char reponse[BUFSIZ];
-
-    // Supprimer le caractère de nouvelle ligne à la fin
-    char *nl = strchr(commande, '\n');
-    if (nl) *nl = '\0';
-
-    if (strcmp(commande, "/number") == 0) {
-        snprintf(reponse, BUFSIZ, "Nombre de clients connectés: %d\n", nombre_clients);
-        write(client_socket, reponse, strlen(reponse));
-    }
-    else if (strcmp(commande, "/date") == 0) {
-        time_t now = time(NULL);
-        struct tm *tm_info = localtime(&now);
-
-        strftime(reponse, BUFSIZ, "Date serveur: %d/%m/%Y %H:%M:%S\n", tm_info);
-        write(client_socket, reponse, strlen(reponse));
-    }
-    else if (strcmp(commande, "/exit") == 0) {
-        printf(">>> Client déconnecté proprement\n");
-        nombre_clients--;
-        close(client_socket);
-        exit(EXIT_SUCCESS);;
-    }
-//    else {
-//        snprintf(reponse, BUFSIZ, "Commande non reconnue: %s\nCommandes disponibles: /number, /date\n", commande);
-//        write(client_socket, reponse, strlen(reponse));
-//    }
-}
-
-// Fonction de gestion des échanges avec un client
-void serveur(int client_socket)
-{
-    signal(SIGCHLD, SIG_IGN);  // évite les zombies lors de la mort des processus enfants
     while (1)
     {
-        fd_set rset;
-        FD_ZERO(&rset);
-        FD_SET(client_socket, &rset);
-        FD_SET(STDIN_FILENO, &rset);
+        // Vider et préparer les sockets à écouter
+        FD_ZERO(&readfds);
+        FD_SET(serveur_socket, &readfds);
+        max_sd = serveur_socket;
 
-        if (select(client_socket + 1, &rset, NULL, NULL, NULL) == -1)
+        // Ajouter les sockets clients
+        for (i = 0; i < MAX_CLIENTS; i++)
         {
-            perror("select");
-            exit(EXIT_FAILURE);
+            sd = clients[i];
+            if (sd > 0)
+                FD_SET(sd, &readfds);
+            if (sd > max_sd)
+                max_sd = sd;
         }
 
-        // Réception de données du client
-        if (FD_ISSET(client_socket, &rset))
+        // Attendre activité
+        activity = select(max_sd + 1, &readfds, NULL, NULL, NULL);
+        if (activity < 0)
         {
-            int octets;
-            unsigned char tampon[BUFSIZ];
-            octets = read(client_socket, tampon, sizeof(tampon));
-            if (octets <= 0)
-            {
-                if (octets == 0){
-                    printf(">>> Client déconnecté proprement\n");
-                }
-                else{
-                    perror("read");  // // Déconnexion brutale
-                }
-
-                nombre_clients--;
-                close(client_socket);
-                exit(EXIT_SUCCESS);
-            }
-            write(STDOUT_FILENO, tampon, octets); // Affiche la requête du client
-            traiter_commande(client_socket, tampon); // Traitement si commande
+            perror("select error");
+            continue;
         }
 
-        // Saisie standard du serveur (utile pour faire parler le serveur)
-        if (FD_ISSET(STDIN_FILENO, &rset))
+        // Nouvelle connexion
+        if (FD_ISSET(serveur_socket, &readfds))
         {
-            int octets;
-            unsigned char tampon[BUFSIZ];
-            octets = read(STDIN_FILENO, tampon, sizeof(tampon));
-            if (octets == 0)
-            {
-                close(client_socket);
-                nombre_clients--;
-                exit(EXIT_SUCCESS);
-            }
-            write(client_socket, tampon, octets);
-        }
-    }
-}
-
-int main(int argc, char **argv)
-{
-    unsigned short port;
-    int serveur_socket;
-    if (argc != 2)
-    {
-        fprintf(stderr, "Erreur sur le nombre d'arguments\nUsage: %s port\n", argv[0]);
-        exit(EXIT_FAILURE);
-        exit(EXIT_FAILURE);
-    }
-    port = atoi(argv[1]);
-    serveur_socket = socket_serveur(port);
-    while (1)
-    {
-        fd_set rset;
-        FD_ZERO(&rset);
-        FD_SET(serveur_socket, &rset);
-        FD_SET(STDIN_FILENO, &rset);
-
-        if (select(serveur_socket + 1, &rset, NULL, NULL, NULL) - 1)
-        {
-            perror("select");
-            exit(EXIT_FAILURE);
-        }
-
-        if (FD_ISSET(serveur_socket, &rset))
-        {
-            int client_socket;
-            struct sockaddr_in client_sockaddr_in;
-            socklen_t taille = sizeof(client_sockaddr_in);
-            struct hostent *hostent;
-
-            /* En attente de la connexion d'un client (commande bloquante par defaut) */
-            client_socket = accept(serveur_socket, (struct sockaddr *)&client_sockaddr_in, &taille);
-
-            if (client_socket == -1)
+            new_socket = accept(serveur_socket, (struct sockaddr *)&client_addr, &client_len);
+            if (new_socket < 0)
             {
                 perror("accept");
                 exit(EXIT_FAILURE);
             }
 
-            nombre_clients++;
+            // Attribuer un pseudo par défaut
+            char pseudo[50] = "Client";
+            snprintf(pseudo, sizeof(pseudo), "Client %d", new_socket);
 
-            switch (fork())
+            // Ajouter le client à la liste
+            for (i = 0; i < MAX_CLIENTS; i++)
             {
-                case -1: /* erreur */
+                if (clients[i] == 0)
                 {
-                    perror("fork");
-                    exit(EXIT_FAILURE);
+                    clients[i] = new_socket;
+                    pseudos[i] = strdup(pseudo); // Enregistrer le pseudo
+                    break;
                 }
-                case 0: /* processus enfant */
+            }
+
+            printf(">>> Nouveau client connecté: %s:%d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+            printf(">>> Pseudo attribué: %s\n", pseudo);
+        }
+
+        // Lire les messages
+        for (i = 0; i < MAX_CLIENTS; i++)
+        {
+            sd = clients[i];
+
+            if (FD_ISSET(sd, &readfds))
+            {
+                char buffer[BUFSIZ];
+                int valread = read(sd, buffer, sizeof(buffer));
+
+                // Déconnexion
+                if (valread == 0)
                 {
-                    close(serveur_socket);
-                    hostent = gethostbyaddr((char *)&client_sockaddr_in.sin_addr.s_addr, sizeof(client_sockaddr_in.sin_addr.s_addr), AF_INET);
-                    if (hostent == NULL)
+                    getpeername(sd, (struct sockaddr *)&client_addr, &client_len);
+                    printf(">>> Client déconnecté: %s:%d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+                    close(sd);
+                    clients[i] = 0;
+                    free(pseudos[i]); // Libérer le pseudo
+                }
+                else
+                {
+                    // Ajout du pseudo devant le message
+                    buffer[valread] = '\0'; // Assurez-vous de finir la chaîne
+                    char message[MAX_MSG_LEN];
+                    int message_len = snprintf(message, sizeof(message), "%s: %s", pseudos[i], buffer);
+
+                    // Vérification de la longueur du message et troncature si nécessaire
+                    if (message_len >= MAX_MSG_LEN)
                     {
-                        perror("gethostbyaddr");
-                        exit(EXIT_FAILURE);
+                        fprintf(stderr, "Message trop long, coupé.\n");
+                        message[MAX_MSG_LEN - 1] = '\0'; // Assurer la troncature
                     }
-                    printf(">>> Connexion depuis %s [%s]\n", hostent->h_name, inet_ntoa(client_sockaddr_in.sin_addr));
-                    serveur(client_socket);
-                    exit(EXIT_SUCCESS);
-                }
-                default: /* processus parent */
-                {
-                    close(client_socket); // Le parent ferme sa copie de la socket
+
+                    // Envoyer aux autres clients
+                    for (int j = 0; j < MAX_CLIENTS; j++)
+                    {
+                        if (clients[j] != 0 && clients[j] != sd)
+                        {
+                            write(clients[j], message, strlen(message));
+                        }
+                    }
                 }
             }
         }
     }
-    exit(EXIT_SUCCESS);
+
+    return 0;
 }

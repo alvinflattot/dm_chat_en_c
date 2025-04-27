@@ -10,14 +10,13 @@
 #include <sys/socket.h>
 #include <sys/select.h>
 
-// Création et connexion du client à un serveur donné (adresse + port)
 int socket_client(char *serveur, unsigned short port)
 {
     int client_socket;
     struct hostent *hostent;
     struct sockaddr_in serveur_sockaddr_in;
 
-    /* Creation de la socket */
+    /* Création de la socket */
     client_socket = socket(PF_INET, SOCK_STREAM, 0);
     if (client_socket == -1)
     {
@@ -51,30 +50,27 @@ int socket_client(char *serveur, unsigned short port)
 
     memcpy(&serveur_sockaddr_in.sin_addr.s_addr, hostent->h_addr_list[0], hostent->h_length);
 
-    printf(">>> Connexion vers le port %d de %s [%s]\n", port, hostent->h_name, inet_ntoa(serveur_sockaddr_in.sin_addr));
+    printf(">>> Connexion vers le serveur: %s\n", serveur);
     if (connect(client_socket, (struct sockaddr *)&serveur_sockaddr_in, sizeof(serveur_sockaddr_in)) == -1)
     {
         perror("connect");
         exit(EXIT_FAILURE);
     }
+
     return client_socket;
 }
 
 int main(int argc, char **argv)
 {
-    char *serveur;
-    unsigned short port;
-    int client_socket;
-
     if (argc != 3)
     {
-        fprintf(stderr, "Erreur sur le nombre d'arguments\nUsage: %s serveur port\n", argv[0]);
+        fprintf(stderr, "Usage: %s serveur port\n", argv[0]);
         exit(EXIT_FAILURE);
     }
 
-    serveur = argv[1];
-    port = atoi(argv[2]);
-    client_socket = socket_client(serveur, port);
+    char *serveur = argv[1];
+    unsigned short port = atoi(argv[2]);
+    int client_socket = socket_client(serveur, port);
 
     for (;;)
     {
@@ -99,16 +95,16 @@ int main(int argc, char **argv)
             if (octets <= 0)
             {
                 if (octets == 0)
-                  fprintf(stderr, ">>> Serveur déconnecté proprement\n");
+                    fprintf(stderr, ">>> Serveur déconnecté proprement\n");
                 else
-                  perror("read");
+                    perror("read");
 
                 fprintf(stderr, ">>> Déconnexion du client\n");
                 close(client_socket);
                 exit(EXIT_FAILURE);
             }
 
-            write(STDOUT_FILENO, tampon, octets);
+            write(STDOUT_FILENO, tampon, octets);  // Afficher le message reçu
         }
 
         // Saisie utilisateur (envoyée au serveur)
@@ -122,9 +118,9 @@ int main(int argc, char **argv)
                 close(client_socket);
                 exit(EXIT_SUCCESS);
             }
-            write(client_socket, tampon, octets);
+            write(client_socket, tampon, octets);  // Envoie au serveur
         }
     }
 
-    exit(EXIT_SUCCESS);
+    return 0;
 }
