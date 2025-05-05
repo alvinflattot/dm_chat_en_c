@@ -81,25 +81,33 @@ void *gerer_client(void *arg) {
     while ((octets = read(socket, tampon, sizeof(tampon))) > 0) {
         tampon[octets] = '\0';
 
-        // Traitement des commandes
-        if (strncmp(tampon, "/number", 7) == 0) {
-            char reponse[128];
-            snprintf(reponse, sizeof(reponse), "Clients connectés : %d\n", client_count);
-            write(socket, reponse, strlen(reponse));
+        // Calculer la longueur du message
+        size_t max_len = sizeof(tampon) - 1; // Laisser de la place pour le caractère nul de fin
+        size_t pseudo_len = strlen(pseudo);
+        size_t buffer_len = strlen(tampon);
+
+        // Limiter la taille du message à la taille maximale autorisée
+        size_t len_to_copy = max_len - pseudo_len - 2; // -2 pour le ": " entre pseudo et message
+
+        if (buffer_len < len_to_copy) {
+            len_to_copy = buffer_len;
         }
-        else if (strncmp(tampon, "/date", 5) == 0) {
-            time_t now = time(NULL);
-            char reponse[128];
-            strftime(reponse, sizeof(reponse), "Date serveur : %d/%m/%Y %H:%M:%S\n", localtime(&now));
-            write(socket, reponse, strlen(reponse));
+
+        // Formater le message en ne dépassant pas la taille allouée
+        char message[1024];
+        snprintf(message, sizeof(message), "%s: %.*s", pseudo, (int)len_to_copy, tampon);
+
+        // Afficher le message dans le serveur
+        printf("Message du client %s: %s\n", pseudo, message);
+
+        // Envoi du message à tous les autres clients
+        pthread_mutex_lock(&clients_mutex);
+        for (int i = 0; i < client_count; ++i) {
+            if (clients[i].socket != socket) {
+                write(clients[i].socket, message, strlen(message));
+            }
         }
-        else if (strncmp(tampon, "/exit", 5) == 0) {
-            break;
-        }
-        else {
-            // Echo
-            write(socket, tampon, octets);
-        }
+        pthread_mutex_unlock(&clients_mutex);
     }
 
     printf(">>> %s déconnecté\n", pseudo);
