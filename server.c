@@ -1,3 +1,8 @@
+/*
+ * Serveur de chat multiclient avec gestion de salons dynamiques
+ * Fonctionnalités : pseudo unique, messages dans salons, création/entrée de salons, suppression automatique des salons vides
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,83 +16,121 @@
 #define MAX_CLIENTS 100
 #define MAX_PSEUDO 32
 #define MAX_MESSAGE 1024
+#define MAX_SALONS 50
+#define MAX_SALON_NAME 32
 
-typedef struct {
+// Structure client
+typedef struct client {
     int socket;
     char pseudo[MAX_PSEUDO];
+    struct salon *salon;
 } client_t;
 
-client_t clients[MAX_CLIENTS];
+// Structure salon
+typedef struct salon {
+    char nom[MAX_SALON_NAME];
+    client_t *clients[MAX_CLIENTS];
+    int nb_clients;
+} salon_t;
+
+client_t *clients[MAX_CLIENTS];
+salon_t *salons[MAX_SALONS];
 int client_count = 0;
-pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+int salon_count = 0;
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// Vérifie si un pseudo est déjà utilisé
-int pseudo_existe(const char *pseudo) {
-    pthread_mutex_lock(&clients_mutex);
-    for (int i = 0; i < client_count; ++i) {
-        if (strcmp(clients[i].pseudo, pseudo) == 0) {
-            pthread_mutex_unlock(&clients_mutex);
-            return 1;
-        }
+// Salon par défaut (lobby)
+salon_t *salon_par_defaut = NULL;
+
+// Recherche un salon par son nom
+salon_t *trouver_salon(const char *nom) {
+    for (int i = 0; i < salon_count; i++) {
+        if (strcmp(salons[i]->nom, nom) == 0) return salons[i];
     }
-    pthread_mutex_unlock(&clients_mutex);
-    return 0;
+    return NULL;
 }
 
-// Ajoute un client à la liste
-void ajouter_client(int socket, const char *pseudo) {
-    pthread_mutex_lock(&clients_mutex);
-    if (client_count < MAX_CLIENTS) {
-        clients[client_count].socket = socket;
-        strncpy(clients[client_count].pseudo, pseudo, MAX_PSEUDO - 1);
-        clients[client_count].pseudo[MAX_PSEUDO - 1] = '\0';
-        client_count++;
-    }
-    pthread_mutex_unlock(&clients_mutex);
+// Crée un nouveau salon ou retourne celui existant
+salon_t *rejoindre_ou_creer_salon(const char *nom) {
+    salon_t *s = trouver_salon(nom);
+    if (s) return s;
+
+    if (salon_count >= MAX_SALONS) return NULL;
+    s = malloc(sizeof(salon_t));
+    strncpy(s->nom, nom, MAX_SALON_NAME);
+    s->nb_clients = 0;
+    salons[salon_count++] = s;
+    return s;
 }
 
-// Supprime un client de la liste
-void supprimer_client(int socket) {
-    pthread_mutex_lock(&clients_mutex);
-    for (int i = 0; i < client_count; ++i) {
-        if (clients[i].socket == socket) {
-            clients[i] = clients[client_count - 1]; // Remplace par le dernier
-            client_count--;
+// Ajoute un client à un salon
+void ajouter_client_salon(salon_t *salon, client_t *client) {
+    salon->clients[salon->nb_clients++] = client;
+    client->salon = salon;
+}
+
+// Supprime un client d'un salon
+void supprimer_client_salon(client_t *client) {
+    salon_t *salon = client->salon;
+    if (!salon) return;
+    for (int i = 0; i < salon->nb_clients; i++) {
+        if (salon->clients[i] == client) {
+            salon->clients[i] = salon->clients[--salon->nb_clients];
             break;
         }
     }
-    pthread_mutex_unlock(&clients_mutex);
-}
 
-// Envoie un message à tous les clients sauf l'expéditeur
-void envoyer_message_tous(const char *message, int exp_socket) {
-    pthread_mutex_lock(&clients_mutex);
-    for (int i = 0; i < client_count; ++i) {
-        if (clients[i].socket != exp_socket) {
-            write(clients[i].socket, message, strlen(message));
+    // Si salon vide (et pas le salon par défaut), le supprimer
+    if (salon != salon_par_defaut && salon->nb_clients == 0) {
+        for (int i = 0; i < salon_count; i++) {
+            if (salons[i] == salon) {
+                free(salon);
+                salons[i] = salons[--salon_count];
+                break;
+            }
         }
     }
-    pthread_mutex_unlock(&clients_mutex);
+    client->salon = NULL;
 }
 
-// Envoie un message à tous les clients, y compris l'expéditeur
-void envoyer_message_tous_inclus(const char *message) {
-    pthread_mutex_lock(&clients_mutex);
+// Vérifie l'unicité du pseudo
+int pseudo_existe(const char *pseudo) {
     for (int i = 0; i < client_count; ++i) {
-        write(clients[i].socket, message, strlen(message));
+        if (strcmp(clients[i]->pseudo, pseudo) == 0) return 1;
     }
-    pthread_mutex_unlock(&clients_mutex);
+    return 0;
 }
 
+// Envoie un message à tous les membres du même salon (sauf l'expéditeur si exclus)
+void envoyer_message_salon(salon_t *salon, const char *message, int exp_socket, int inclus) {
+    for (int i = 0; i < salon->nb_clients; i++) {
+        int sock = salon->clients[i]->socket;
+        if (inclus || sock != exp_socket) {
+            write(sock, message, strlen(message));
+        }
+    }
+}
+
+// Lister les salons existants
+void envoyer_liste_salons(int socket) {
+    char tampon[MAX_MESSAGE] = "Salons disponibles:\n";
+    for (int i = 0; i < salon_count; i++) {
+        strcat(tampon, "- ");
+        strcat(tampon, salons[i]->nom);
+        strcat(tampon, "\n");
+    }
+    write(socket, tampon, strlen(tampon));
+}
+
+// Gère un client (thread)
 void *gerer_client(void *arg) {
     int socket = *(int *)arg;
     free(arg);
-
     char tampon[MAX_MESSAGE];
     int octets;
     char pseudo[MAX_PSEUDO];
 
-    // Demande du pseudo unique
+    // Demander pseudo unique
     do {
         write(socket, "Entrez votre pseudo: ", 22);
         octets = read(socket, pseudo, MAX_PSEUDO);
@@ -96,60 +139,72 @@ void *gerer_client(void *arg) {
             return NULL;
         }
         pseudo[strcspn(pseudo, "\r\n")] = '\0';
+        pthread_mutex_lock(&mutex);
         if (pseudo_existe(pseudo)) {
-            write(socket, "Pseudo déjà pris. Essayez un autre.\n", 37);
+            pthread_mutex_unlock(&mutex);
+            write(socket, "Pseudo déjà pris.\n", 21);
+        } else {
+            pthread_mutex_unlock(&mutex);
+            break;
         }
-    } while (pseudo_existe(pseudo));
+    } while (1);
 
-    ajouter_client(socket, pseudo);
-    printf(">>> %s connecté\n", pseudo);
+    // Création client
+    client_t *client = malloc(sizeof(client_t));
+    client->socket = socket;
+    strncpy(client->pseudo, pseudo, MAX_PSEUDO);
+    pthread_mutex_lock(&mutex);
+    clients[client_count++] = client;
+    ajouter_client_salon(salon_par_defaut, client);
+    pthread_mutex_unlock(&mutex);
 
-    // Envoie un message aux autres pour indiquer la connexion
-    char notif_connexion[MAX_MESSAGE];
-    snprintf(notif_connexion, sizeof(notif_connexion), "*** %s a rejoint le chat ***\n", pseudo);
-    envoyer_message_tous(notif_connexion, socket);
-
-    // Message de bienvenue personnel
-    char bienvenue[MAX_MESSAGE];
-    snprintf(bienvenue, sizeof(bienvenue), "Bienvenue %s ! Tapez /exit pour quitter.\n", pseudo);
-    write(socket, bienvenue, strlen(bienvenue));
+    // Message de bienvenue
+    snprintf(tampon, sizeof(tampon), "Bienvenue %s dans %s !\n", pseudo, client->salon->nom);
+    write(socket, tampon, strlen(tampon));
 
     while ((octets = read(socket, tampon, sizeof(tampon) - 1)) > 0) {
         tampon[octets] = '\0';
         tampon[strcspn(tampon, "\r\n")] = '\0';
 
-        if (strcmp(tampon, "/number") == 0) {
+        if (strcmp(tampon, "/exit") == 0) break;
+
+        pthread_mutex_lock(&mutex);
+        if (strcmp(tampon, "/list") == 0) {
+            envoyer_liste_salons(socket);
+        } else if (strncmp(tampon, "/join ", 6) == 0) {
+            char *nom_salon = tampon + 6;
+            supprimer_client_salon(client);
+            salon_t *s = rejoindre_ou_creer_salon(nom_salon);
+            ajouter_client_salon(s, client);
+            snprintf(tampon, sizeof(tampon), "Vous avez rejoint %s\n", s->nom);
+            write(socket, tampon, strlen(tampon));
+        } else if (strcmp(tampon, "/number") == 0) {
             int n = rand() % 100;
-            char msg[64];
-            snprintf(msg, sizeof(msg), "Nombre aléatoire: %d\n", n);
-            write(socket, msg, strlen(msg));
-            continue;
+            snprintf(tampon, sizeof(tampon), "Nombre aléatoire: %d\n", n);
+            write(socket, tampon, strlen(tampon));
         } else if (strcmp(tampon, "/date") == 0) {
             time_t now = time(NULL);
-            char msg[128];
-            strftime(msg, sizeof(msg), "Date serveur : %d/%m/%Y %H:%M:%S\n", localtime(&now));
-            write(socket, msg, strlen(msg));
-            continue;
-        } else if (strcmp(tampon, "/exit") == 0) {
-            break;
+            strftime(tampon, sizeof(tampon), "Date serveur : %d/%m/%Y %H:%M:%S\n", localtime(&now));
+            write(socket, tampon, strlen(tampon));
+        } else {
+            char message[MAX_MESSAGE + MAX_PSEUDO + 4];
+            snprintf(message, sizeof(message), "%s: %s\n", client->pseudo, tampon);
+            envoyer_message_salon(client->salon, message, socket, 1);
         }
-
-        // Préfixe le message avec le pseudo
-        char message[MAX_MESSAGE + MAX_PSEUDO + 4];
-        snprintf(message, sizeof(message), "%s: %s\n", pseudo, tampon);
-
-        printf("%s", message);
-        envoyer_message_tous_inclus(message);
+        pthread_mutex_unlock(&mutex);
     }
 
-    // Notifie les autres de la déconnexion
-    printf(">>> %s déconnecté\n", pseudo);
-    char notif_depart[MAX_MESSAGE];
-    snprintf(notif_depart, sizeof(notif_depart), "*** %s a quitté le chat ***\n", pseudo);
-    envoyer_message_tous(notif_depart, socket);
-
-    supprimer_client(socket);
+    pthread_mutex_lock(&mutex);
+    supprimer_client_salon(client);
+    for (int i = 0; i < client_count; i++) {
+        if (clients[i] == client) {
+            clients[i] = clients[--client_count];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&mutex);
     close(socket);
+    free(client);
     return NULL;
 }
 
@@ -159,6 +214,7 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
+    srand(time(NULL));
     unsigned short port = atoi(argv[1]);
     int serveur_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (serveur_socket == -1) {
@@ -187,6 +243,9 @@ int main(int argc, char *argv[]) {
 
     printf(">>> Serveur en écoute sur le port %d...\n", port);
 
+    // Crée le salon par défaut (lobby)
+    salon_par_defaut = rejoindre_ou_creer_salon("lobby");
+
     while (1) {
         struct sockaddr_in client_addr;
         socklen_t len = sizeof(client_addr);
@@ -197,10 +256,9 @@ int main(int argc, char *argv[]) {
             free(client_socket);
             continue;
         }
-
         pthread_t tid;
         pthread_create(&tid, NULL, gerer_client, client_socket);
-        pthread_detach(tid); // Pas besoin de join
+        pthread_detach(tid);
     }
 
     close(serveur_socket);
