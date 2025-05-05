@@ -10,6 +10,7 @@
 
 #define MAX_CLIENTS 100
 #define MAX_PSEUDO 32
+#define MAX_MESSAGE 1024
 
 typedef struct {
     int socket;
@@ -20,17 +21,20 @@ client_t clients[MAX_CLIENTS];
 int client_count = 0;
 pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// Vérifie si un pseudo est déjà pris
+// Vérifie si un pseudo est déjà utilisé
 int pseudo_existe(const char *pseudo) {
+    pthread_mutex_lock(&clients_mutex);
     for (int i = 0; i < client_count; ++i) {
         if (strcmp(clients[i].pseudo, pseudo) == 0) {
+            pthread_mutex_unlock(&clients_mutex);
             return 1;
         }
     }
+    pthread_mutex_unlock(&clients_mutex);
     return 0;
 }
 
-// Ajoute un client (protégé par mutex)
+// Ajoute un client à la liste
 void ajouter_client(int socket, const char *pseudo) {
     pthread_mutex_lock(&clients_mutex);
     if (client_count < MAX_CLIENTS) {
@@ -42,7 +46,7 @@ void ajouter_client(int socket, const char *pseudo) {
     pthread_mutex_unlock(&clients_mutex);
 }
 
-// Supprime un client (protégé par mutex)
+// Supprime un client de la liste
 void supprimer_client(int socket) {
     pthread_mutex_lock(&clients_mutex);
     for (int i = 0; i < client_count; ++i) {
@@ -55,15 +59,26 @@ void supprimer_client(int socket) {
     pthread_mutex_unlock(&clients_mutex);
 }
 
+// Envoie un message à tous les clients sauf l'expéditeur
+void envoyer_message_tous(const char *message, int exp_socket) {
+    pthread_mutex_lock(&clients_mutex);
+    for (int i = 0; i < client_count; ++i) {
+        if (clients[i].socket != exp_socket) {
+            write(clients[i].socket, message, strlen(message));
+        }
+    }
+    pthread_mutex_unlock(&clients_mutex);
+}
+
 void *gerer_client(void *arg) {
     int socket = *(int *)arg;
     free(arg);
 
-    char tampon[BUFSIZ];
+    char tampon[MAX_MESSAGE];
     int octets;
-
-    // Demande du pseudo
     char pseudo[MAX_PSEUDO];
+
+    // Demande du pseudo unique
     do {
         write(socket, "Entrez votre pseudo: ", 22);
         octets = read(socket, pseudo, MAX_PSEUDO);
@@ -72,45 +87,57 @@ void *gerer_client(void *arg) {
             return NULL;
         }
         pseudo[strcspn(pseudo, "\r\n")] = '\0';
+        if (pseudo_existe(pseudo)) {
+            write(socket, "Pseudo déjà pris. Essayez un autre.\n", 37);
+        }
     } while (pseudo_existe(pseudo));
 
     ajouter_client(socket, pseudo);
     printf(">>> %s connecté\n", pseudo);
 
-    // Boucle principale
-    while ((octets = read(socket, tampon, sizeof(tampon))) > 0) {
+    // Envoie un message aux autres pour indiquer la connexion
+    char notif_connexion[MAX_MESSAGE];
+    snprintf(notif_connexion, sizeof(notif_connexion), "*** %s a rejoint le chat ***\n", pseudo);
+    envoyer_message_tous(notif_connexion, socket);
+
+    // Message de bienvenue personnel
+    char bienvenue[MAX_MESSAGE];
+    snprintf(bienvenue, sizeof(bienvenue), "Bienvenue %s ! Tapez /exit pour quitter.\n", pseudo);
+    write(socket, bienvenue, strlen(bienvenue));
+
+    while ((octets = read(socket, tampon, sizeof(tampon) - 1)) > 0) {
         tampon[octets] = '\0';
+        tampon[strcspn(tampon, "\r\n")] = '\0';
 
-        // Calculer la longueur du message
-        size_t max_len = sizeof(tampon) - 1; // Laisser de la place pour le caractère nul de fin
-        size_t pseudo_len = strlen(pseudo);
-        size_t buffer_len = strlen(tampon);
-
-        // Limiter la taille du message à la taille maximale autorisée
-        size_t len_to_copy = max_len - pseudo_len - 2; // -2 pour le ": " entre pseudo et message
-
-        if (buffer_len < len_to_copy) {
-            len_to_copy = buffer_len;
+        if (strcmp(tampon, "/number") == 0) {
+            int n = rand() % 100;
+            char msg[64];
+            snprintf(msg, sizeof(msg), "Nombre aléatoire: %d\n", n);
+            write(socket, msg, strlen(msg));
+            continue;
+        } else if (strcmp(tampon, "/date") == 0) {
+            time_t now = time(NULL);
+            char msg[128];
+            strftime(msg, sizeof(msg), "Date serveur : %d/%m/%Y %H:%M:%S\n", localtime(&now));
+            write(socket, msg, strlen(msg));
+            continue;
+        } else if (strcmp(tampon, "/exit") == 0) {
+            break;
         }
 
-        // Formater le message en ne dépassant pas la taille allouée
-        char message[1024];
-        snprintf(message, sizeof(message), "%s: %.*s", pseudo, (int)len_to_copy, tampon);
+        char message[MAX_MESSAGE + MAX_PSEUDO + 4];
+        snprintf(message, sizeof(message), "%s: %s\n", pseudo, tampon);
 
-        // Afficher le message dans le serveur
-        printf("Message du client %s: %s\n", pseudo, message);
-
-        // Envoi du message à tous les autres clients
-        pthread_mutex_lock(&clients_mutex);
-        for (int i = 0; i < client_count; ++i) {
-            if (clients[i].socket != socket) {
-                write(clients[i].socket, message, strlen(message));
-            }
-        }
-        pthread_mutex_unlock(&clients_mutex);
+        printf("%s", message);
+        envoyer_message_tous(message, socket);
     }
 
+    // Notifie les autres de la déconnexion
     printf(">>> %s déconnecté\n", pseudo);
+    char notif_depart[MAX_MESSAGE];
+    snprintf(notif_depart, sizeof(notif_depart), "*** %s a quitté le chat ***\n", pseudo);
+    envoyer_message_tous(notif_depart, socket);
+
     supprimer_client(socket);
     close(socket);
     return NULL;
@@ -122,11 +149,8 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    int serveur_socket;
     unsigned short port = atoi(argv[1]);
-    struct sockaddr_in serveur_addr;
-
-    serveur_socket = socket(AF_INET, SOCK_STREAM, 0);
+    int serveur_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (serveur_socket == -1) {
         perror("socket");
         exit(EXIT_FAILURE);
@@ -135,6 +159,7 @@ int main(int argc, char *argv[]) {
     int opt = 1;
     setsockopt(serveur_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
+    struct sockaddr_in serveur_addr;
     memset(&serveur_addr, 0, sizeof(serveur_addr));
     serveur_addr.sin_family = AF_INET;
     serveur_addr.sin_port = htons(port);
@@ -150,7 +175,7 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    printf(">>> Serveur en attente sur le port %d...\n", port);
+    printf(">>> Serveur en écoute sur le port %d...\n", port);
 
     while (1) {
         struct sockaddr_in client_addr;
@@ -165,7 +190,7 @@ int main(int argc, char *argv[]) {
 
         pthread_t tid;
         pthread_create(&tid, NULL, gerer_client, client_socket);
-        pthread_detach(tid);
+        pthread_detach(tid); // Pas besoin de join
     }
 
     close(serveur_socket);
