@@ -70,6 +70,15 @@ void envoyer_message_tous(const char *message, int exp_socket) {
     pthread_mutex_unlock(&clients_mutex);
 }
 
+// Envoie un message à tous les clients, y compris l'expéditeur
+void envoyer_message_tous_inclus(const char *message) {
+    pthread_mutex_lock(&clients_mutex);
+    for (int i = 0; i < client_count; ++i) {
+        write(clients[i].socket, message, strlen(message));
+    }
+    pthread_mutex_unlock(&clients_mutex);
+}
+
 void *gerer_client(void *arg) {
     int socket = *(int *)arg;
     free(arg);
@@ -125,11 +134,12 @@ void *gerer_client(void *arg) {
             break;
         }
 
+        // Préfixe le message avec le pseudo
         char message[MAX_MESSAGE + MAX_PSEUDO + 4];
         snprintf(message, sizeof(message), "%s: %s\n", pseudo, tampon);
 
         printf("%s", message);
-        envoyer_message_tous(message, socket);
+        envoyer_message_tous_inclus(message);
     }
 
     // Notifie les autres de la déconnexion
