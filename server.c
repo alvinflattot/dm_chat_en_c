@@ -19,6 +19,11 @@
 #define MAX_SALONS 50
 #define MAX_SALON_NAME 32
 
+// Types de rôles
+#define ROLE_UTILISATEUR 0
+#define ROLE_MODERATEUR 1
+#define ROLE_ADMIN 2
+
 // Structure client
 typedef struct client {
     int socket;
@@ -135,8 +140,9 @@ void *gerer_client(void *arg) {
         write(socket, "Entrez votre pseudo: ", 22);
         octets = read(socket, pseudo, MAX_PSEUDO);
         if (octets <= 0) {
-            close(socket);
-            return NULL;
+			printf(">>> %s s\'est déconnecté(e)\n", pseudo);
+			close(socket);
+			return NULL;
         }
         pseudo[strcspn(pseudo, "\r\n")] = '\0';
         pthread_mutex_lock(&mutex);
@@ -156,7 +162,8 @@ void *gerer_client(void *arg) {
     pthread_mutex_lock(&mutex);
     clients[client_count++] = client;
     ajouter_client_salon(salon_par_defaut, client);
-    pthread_mutex_unlock(&mutex);
+    printf(">>> %s s\'est connecté(e) et a rejoint le salon %s\n", client->pseudo, client->salon->nom);
+	pthread_mutex_unlock(&mutex);
 
     // Message de bienvenue
     snprintf(tampon, sizeof(tampon), "Bienvenue %s dans %s !\n", pseudo, client->salon->nom);
@@ -171,24 +178,29 @@ void *gerer_client(void *arg) {
         pthread_mutex_lock(&mutex);
         if (strcmp(tampon, "/list") == 0) {
             envoyer_liste_salons(socket);
+			printf(">>> %s a exécuté la commande /list\n", client->pseudo);
         } else if (strncmp(tampon, "/join ", 6) == 0) {
             char *nom_salon = tampon + 6;
             supprimer_client_salon(client);
             salon_t *s = rejoindre_ou_creer_salon(nom_salon);
             ajouter_client_salon(s, client);
+    		printf(">>> %s a rejoint le salon %s\n", client->pseudo, client->salon->nom);
             snprintf(tampon, sizeof(tampon), "Vous avez rejoint %s\n", s->nom);
             write(socket, tampon, strlen(tampon));
         } else if (strcmp(tampon, "/number") == 0) {
             int n = rand() % 100;
             snprintf(tampon, sizeof(tampon), "Nombre aléatoire: %d\n", n);
             write(socket, tampon, strlen(tampon));
+    		printf(">>> %s a exécuté la commande /number\n", client->pseudo);
         } else if (strcmp(tampon, "/date") == 0) {
             time_t now = time(NULL);
             strftime(tampon, sizeof(tampon), "Date serveur : %d/%m/%Y %H:%M:%S\n", localtime(&now));
             write(socket, tampon, strlen(tampon));
+    		printf(">>> %s a exécuté la commande /date\n", client->pseudo);
         } else {
             char message[MAX_MESSAGE + MAX_PSEUDO + 4];
             snprintf(message, sizeof(message), "%s: %s\n", client->pseudo, tampon);
+    		printf("[%s][%s] %s\n", client->salon->nom, client->pseudo, tampon);
             envoyer_message_salon(client->salon, message, socket, 1);
         }
         pthread_mutex_unlock(&mutex);
@@ -203,6 +215,7 @@ void *gerer_client(void *arg) {
         }
     }
     pthread_mutex_unlock(&mutex);
+        printf(">>> %s s\'est déconnecté(e)\n", client->pseudo);
     close(socket);
     free(client);
     return NULL;
