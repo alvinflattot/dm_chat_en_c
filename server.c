@@ -237,6 +237,74 @@ void *gerer_client(void *arg) {
             strftime(tampon, sizeof(tampon), "Date serveur : %d/%m/%Y %H:%M:%S\n", localtime(&now));
             write(socket, tampon, strlen(tampon));
             printf(">>> %s a exécuté la commande /date\n", client->pseudo);
+ } else if (strncmp(tampon, "/kick ", 6) == 0) {
+            if (client->salon == salon_par_defaut) {
+                write(socket, "Commande indisponible dans le salon par défaut.\n", 45);
+            } else {
+                int role = trouver_role(client->salon, client);
+                if (role < ROLE_MODERATEUR) {
+                    write(socket, "Permission refusée.\n", 22);
+                } else {
+                    char *target = tampon + 6;
+                    salon_t *salon = client->salon;
+                    for (int i = 0; i < salon->nb_clients; i++) {
+                        if (strcmp(salon->clients[i].client->pseudo, target) == 0) {
+                            client_t *cible = salon->clients[i].client;
+                            supprimer_client_salon(cible);
+                            ajouter_client_salon(salon_par_defaut, cible);
+                            write(cible->socket, "Vous avez été expulsé du salon.\n", 34);
+                            snprintf(tampon, sizeof(tampon), "%s a été expulsé du salon.\n", cible->pseudo);
+                            envoyer_message_salon(salon, tampon, -1, 1);
+                            break;
+                        }
+                    }
+                }
+            }
+        } else if (strncmp(tampon, "/ban ", 5) == 0) {
+            write(socket, "Fonction bannir non implémentée totalement.\n", 43);
+            // Suggestion future : liste noire par salon
+        } else if (strncmp(tampon, "/promote ", 9) == 0) {
+            if (client->salon == salon_par_defaut) {
+                write(socket, "Commande indisponible dans le salon par défaut.\n", 45);
+            } else {
+                int role = trouver_role(client->salon, client);
+                if (role < ROLE_MODERATEUR) {
+                    write(socket, "Permission refusée.\n", 22);
+                } else {
+                    char *target = tampon + 9;
+                    salon_t *salon = client->salon;
+                    for (int i = 0; i < salon->nb_clients; i++) {
+                        if (strcmp(salon->clients[i].client->pseudo, target) == 0) {
+                            if (role == ROLE_MODERATEUR && salon->clients[i].role < ROLE_MODERATEUR) {
+                                salon->clients[i].role = ROLE_MODERATEUR;
+                                snprintf(tampon, sizeof(tampon), "%s est maintenant modérateur.\n", target);
+                                envoyer_message_salon(salon, tampon, -1, 1);
+                            } else if (role == ROLE_ADMIN) {
+                                salon->clients[i].role = ROLE_ADMIN;
+                                snprintf(tampon, sizeof(tampon), "%s est maintenant administrateur.\n", target);
+                                envoyer_message_salon(salon, tampon, -1, 1);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        } else if (strcmp(tampon, "/destroy") == 0) {
+            if (client->salon == salon_par_defaut) {
+                write(socket, "Impossible de détruire le salon par défaut.\n", 43);
+            } else if (trouver_role(client->salon, client) != ROLE_ADMIN) {
+                write(socket, "Seul un administrateur peut détruire ce salon.\n", 47);
+            } else {
+                salon_t *salon = client->salon;
+                for (int i = salon->nb_clients - 1; i >= 0; i--) {
+                    client_t *cible = salon->clients[i].client;
+                    supprimer_client_salon(cible);
+                    ajouter_client_salon(salon_par_defaut, cible);
+                    write(cible->socket, "Salon supprimé par l'administrateur. Vous êtes déplacé dans le salon par défaut.\n", 85);
+                }
+                snprintf(tampon, sizeof(tampon), "Le salon %s a été supprimé par l'administrateur.\n", salon->nom);
+                printf(">>> Salon %s détruit par %s\n", salon->nom, client->pseudo);
+            }
         } else {
             char message[MAX_MESSAGE + MAX_PSEUDO + 4];
             int role = trouver_role(client->salon, client);
