@@ -25,16 +25,23 @@
 #define ROLE_ADMIN 2
 
 // Structure client
+struct salon;
 typedef struct client {
     int socket;
     char pseudo[MAX_PSEUDO];
     struct salon *salon;
 } client_t;
 
+// Structure client + rôle dans salon
+typedef struct client_role {
+    client_t *client;
+    int role;
+} client_role_t;
+
 // Structure salon
 typedef struct salon {
     char nom[MAX_SALON_NAME];
-    client_t *clients[MAX_CLIENTS];
+    client_role_t clients[MAX_CLIENTS];
     int nb_clients;
 } salon_t;
 
@@ -47,12 +54,31 @@ pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 // Salon par défaut (lobby)
 salon_t *salon_par_defaut = NULL;
 
+// Préfixe en fonction du rôle
+const char *prefixe_role(int role) {
+    switch (role) {
+        case ROLE_ADMIN: return "@";
+        case ROLE_MODERATEUR: return "#";
+        default: return "";
+    }
+}
+
 // Recherche un salon par son nom
 salon_t *trouver_salon(const char *nom) {
     for (int i = 0; i < salon_count; i++) {
         if (strcmp(salons[i]->nom, nom) == 0) return salons[i];
     }
     return NULL;
+}
+
+// Recherche le rôle d'un client dans un salon
+int trouver_role(salon_t *salon, client_t *client) {
+    for (int i = 0; i < salon->nb_clients; i++) {
+        if (salon->clients[i].client == client) {
+            return salon->clients[i].role;
+        }
+    }
+    return ROLE_UTILISATEUR;
 }
 
 // Crée un nouveau salon ou retourne celui existant
@@ -71,7 +97,7 @@ salon_t *rejoindre_ou_creer_salon(const char *nom) {
 // Envoie un message à tous les membres du même salon (sauf l'expéditeur si exclus)
 void envoyer_message_salon(salon_t *salon, const char *message, int exp_socket, int inclus) {
     for (int i = 0; i < salon->nb_clients; i++) {
-        int sock = salon->clients[i]->socket;
+        int sock = salon->clients[i].client->socket;
         if (inclus || sock != exp_socket) {
             write(sock, message, strlen(message));
         }
@@ -80,12 +106,15 @@ void envoyer_message_salon(salon_t *salon, const char *message, int exp_socket, 
 
 // Ajoute un client à un salon et notifie les autres membres
 void ajouter_client_salon(salon_t *salon, client_t *client) {
-    salon->clients[salon->nb_clients++] = client;
+    int role = (salon != salon_par_defaut && salon->nb_clients == 0) ? ROLE_ADMIN : ROLE_UTILISATEUR;
+    salon->clients[salon->nb_clients].client = client;
+    salon->clients[salon->nb_clients].role = role;
+    salon->nb_clients++;
     client->salon = salon;
 
     // Notification de connexion
     char message[MAX_MESSAGE];
-    snprintf(message, sizeof(message), "%s s'est connecté.\n", client->pseudo);
+    snprintf(message, sizeof(message), "%s%s s'est connecté.\n", prefixe_role(role), client->pseudo);
     envoyer_message_salon(salon, message, client->socket, 0);
 }
 
@@ -100,7 +129,7 @@ void supprimer_client_salon(client_t *client) {
     envoyer_message_salon(salon, message, client->socket, 0);
 
     for (int i = 0; i < salon->nb_clients; i++) {
-        if (salon->clients[i] == client) {
+        if (salon->clients[i].client == client) {
             salon->clients[i] = salon->clients[--salon->nb_clients];
             break;
         }
@@ -210,8 +239,9 @@ void *gerer_client(void *arg) {
             printf(">>> %s a exécuté la commande /date\n", client->pseudo);
         } else {
             char message[MAX_MESSAGE + MAX_PSEUDO + 4];
-            snprintf(message, sizeof(message), "%s: %s\n", client->pseudo, tampon);
-            printf("[%s][%s] %s\n", client->salon->nom, client->pseudo, tampon);
+            int role = trouver_role(client->salon, client);
+            snprintf(message, sizeof(message), "%s%s: %s\n", prefixe_role(role), client->pseudo, tampon);
+            printf("[%s][%s%s] %s\n", client->salon->nom, prefixe_role(role), client->pseudo, tampon);
             envoyer_message_salon(client->salon, message, socket, 1);
         }
         pthread_mutex_unlock(&mutex);
